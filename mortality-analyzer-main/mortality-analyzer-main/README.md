@@ -12,7 +12,7 @@
    AWS_TEXTRACT_REGION=eu-central-1
    AWS_S3_BUCKET=tasmia-textract-files
    AWS_S3_BUCKET_REGION=eu-north-1
-   DATABASE_URL=postgresql://...
+   DATABASE_URL=your-database-url
    JWT_SECRET=your-jwt-secret
    GROQ_API_KEY=your-groq-api-key
    GEMINI_API_KEY=your-gemini-api-key

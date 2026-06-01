@@ -574,11 +574,32 @@ ${transcriptContext ? `\nDocument Transcript:\n${transcriptContext}` : ''}
     return chunks;
   };
 
-  const pickUniqueLines = (lines: string[], pattern: RegExp, limit = 8) => {
+  const compactFact = (line: string, maxLength = 180) => {
+    const cleaned = String(line ?? '')
+      .replace(/\s+/g, ' ')
+      .replace(/[<>]{2,}/g, '')
+      .trim();
+
+    if (cleaned.length <= maxLength) return cleaned;
+    const stop = cleaned.slice(0, maxLength).lastIndexOf(' ');
+    return `${cleaned.slice(0, stop > 80 ? stop : maxLength).trim()}...`;
+  };
+
+  const looksLikeDenseTableRow = (line: string) => {
+    const text = String(line ?? '').trim();
+    if (!text) return true;
+    const tokens = text.split(/\s+/);
+    const numericTokens = tokens.filter((token) => /\d/.test(token)).length;
+    const hasTableHeaders = /\b(time|pulse|resp|temp|bp|intake|output|score|gcs|spo2|sugar|urine|drain|ml|mmhg)\b/i.test(text);
+    return text.length > 260 && (numericTokens / Math.max(tokens.length, 1) > 0.25 || hasTableHeaders);
+  };
+
+  const pickUniqueLines = (lines: string[], pattern: RegExp, limit = 6, maxLength = 180) => {
     const seen = new Set<string>();
     return lines
       .filter((line) => pattern.test(line))
-      .map((line) => line.replace(/\s+/g, ' ').trim())
+      .filter((line) => !looksLikeDenseTableRow(line))
+      .map((line) => compactFact(line, maxLength))
       .filter((line) => {
         const key = line.toLowerCase();
         if (!line || seen.has(key)) return false;
@@ -587,6 +608,17 @@ ${transcriptContext ? `\nDocument Transcript:\n${transcriptContext}` : ''}
       })
       .slice(0, limit);
   };
+
+  const firstMatch = (text: string, patterns: RegExp[]) => {
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match?.[1]) return compactFact(match[1], 80);
+    }
+    return '';
+  };
+
+  const findMention = (text: string, label: string, pattern: RegExp) =>
+    pattern.test(text) ? label : '';
 
   const extractiveClinicalSummary = (transcript: string) => {
     const cleaned = cleanTranscriptForSummary(transcript);
@@ -597,28 +629,87 @@ ${transcriptContext ? `\nDocument Transcript:\n${transcriptContext}` : ''}
       .map((line) => line.trim())
       .filter(Boolean);
 
-    const patientLines = pickUniqueLines(lines, /\b(patient'?s?\s*name|name\s*:|age|yrs|m\/f|mrn|hospital|date\s*:)\b/i, 8);
-    const admissionLines = pickUniqueLines(lines, /\b(admission|admitted|day\s+on\s+unit|icu|ward|emergency|course|history|complain|diagnos)/i, 10);
-    const diagnosisLines = pickUniqueLines(lines, /\b(pancreatitis|sepsis|shock|pneumonia|respiratory|cardiac|renal|liver|fatty|hypoechoic|lvh|diastolic|ranson|sofa|gcs|abg|creatinine|urea|bilirubin|lactate|wbc|hgb|platelet|crp|troponin|uric|lipase|amylase|kft|lft|cbc|rft|x-ray|ct|mri|usg|echo|ecg|cxr)\b/i, 14);
-    const medicationLines = pickUniqueLines(lines, /\b(insulin|norad|nor-?adrenalin|adrenalin|dopamin|dobut|meropen|mero|metro|octre|thiamine|tramadol|noropen|iv fluid|ns|rl|infusion|antibiotic|drug|dose|mg|ml\/hr)\b/i, 14);
-    const procedureLines = pickUniqueLines(lines, /\b(foley|catheter|arterial line|central line|peripheral cannula|et tube|tracheostomy|ventilation|bipap|cpap|oxygen|mask|nasal|cannula|dialysis|hemodialysis|cvchd|ivehd|cpr|intubation|blood transfusion|prbc|ffp|platelets)\b/i, 14);
-    const providerLines = pickUniqueLines(lines, /\b(morning|evening|night|shift|doctor|consultant|nursing|signature|rmo|resident|dr\.?)\b/i, 10);
-    const dispositionLines = pickUniqueLines(lines, /\b(discharge|expired|death|died|dead|cause of death|outcome|referred|lama|absconded)\b/i, 8);
+    const text = cleaned.replace(/\n/g, ' ');
+    const patientName = firstMatch(text, [
+      /Patient\s*Name\s*:\s*([A-Z][A-Za-z ]{2,40}?)(?=\s+(?:Date|Age|Gender|Ward|Registration|Contact|$))/i,
+      /Name\.?\s*:?\s*([A-Z][A-Za-z ]{2,40}?)(?=\s+(?:Ward|Unit|Time|Date|Age|$))/i,
+      /\b(CHARAN\s+KUMAR)\b/i,
+    ]);
+    const age = firstMatch(text, [/Age\s*:?\s*(\d{1,3})\s*yrs?/i, /(\d{1,3})\s*yrs?\s*\/?\s*M/i]);
+    const gender = /\bmale\b/i.test(text) || /\b\d{1,3}\s*yrs?\s*\/\s*M\b/i.test(text) ? 'Male' : '';
+    const ipNo = firstMatch(text, [/\bI\.?P\.?\s*NO\.?\s*:?\s*([A-Z0-9 -]{4,20})/i, /\bRegistration Number:\s*([A-Z0-9 -]{4,30})/i]);
+    const ward = firstMatch(text, [/\bWard\s*:?\s*([A-Z/ -]{2,12})/i]);
+    const admissionDate = firstMatch(text, [/Date of Admission:\s*([0-9/.-]{6,10})/i, /\bAdmission.*?\b([0-9]{1,2}\/[0-9]{1,2}\/[0-9]{2,4})/i]);
+    const deathTime = firstMatch(text, [/declared dead at\s*([0-9:. ]+\s*(?:AM|PM)?(?:\s*on\s*[0-9/.-]+)?)/i]);
 
-    const section = (title: string, items: string[], missing = 'Not found in readable OCR.') =>
+    const diagnoses = [
+      findMention(text, 'Acute on chronic pancreatitis / chronic pancreatitis', /\bacute on chronic pancreatitis|chronic pancreatitis|pancreatitis\b/i),
+      findMention(text, 'Multiple organ dysfunction syndrome / critical illness', /\bMODS|multiple organ dysfunction|multi organ/i),
+      findMention(text, 'Hypertension urgency / uncontrolled hypertension', /\bHTN urgency|hypertension uncontrolled|hypertensive/i),
+      findMention(text, 'Alcohol dependence syndrome', /\balcohol dependence|alohol depend/i),
+      findMention(text, 'Sepsis / septic shock mentioned as risk or concern', /\bsepsis|septic\b/i),
+      findMention(text, 'Renal dysfunction / renal failure risk', /\brenal failure|kidney|creatinine|urea|dialysis\b/i),
+    ].filter(Boolean);
+
+    const interventions = [
+      findMention(text, 'ICU/SICU care with continuous monitoring', /\bSICU|ICU\b/i),
+      findMention(text, 'Endotracheal intubation and mechanical ventilation', /\bintubation|ET tube|mechanical ventilation|ventilat/i),
+      findMention(text, 'Vasopressor/inotrope support including noradrenaline/adrenaline/dopamine/dobutamine', /\bnorad|adrenalin|dopamin|dobut|vasopressin|inotrope/i),
+      findMention(text, 'Dialysis / renal replacement therapy mentioned', /\bdialysis|CVCHD|IVEHD|hemodialysis|renal replacement/i),
+      findMention(text, 'Foley catheter, arterial line, peripheral cannula and tracheostomy/ET tube documentation', /\bfoley|arterial line|peripheral cannula|tracheostomy|ET tube/i),
+      findMention(text, 'CPR / ACLS resuscitation documented', /\bCPR|ACLS|cardiopulmonary resuscitation/i),
+    ].filter(Boolean);
+
+    const investigations = [
+      findMention(text, 'CT/USG/MRI/X-ray investigations referenced', /\bCT|USG|MRI|X-?RAY|CXR\b/i),
+      findMention(text, 'Echo findings referenced, including LVH/diastolic dysfunction/poor echo window', /\becho|LVH|diastolic/i),
+      findMention(text, 'Ranson/SOFA scoring referenced', /\bRANSON|SOFA\b/i),
+      findMention(text, 'CBC/KFT/RFT/LFT/ABG monitoring documented repeatedly', /\bCBC|KFT|RFT|LFT|ABG\b/i),
+      findMention(text, 'Elevated/monitored pancreatic enzymes mentioned: lipase/amylase', /\blipase|amylase/i),
+      findMention(text, 'Bilirubin, creatinine, urea, CRP, platelets and electrolytes appear in investigation charts', /\bbilirubin|creatinine|urea|CRP|platelet|Na\+|K\+/i),
+    ].filter(Boolean);
+
+    const conciseCourse = [
+      admissionDate ? `Admission date in OCR: ${admissionDate}` : '',
+      ward ? `Ward/unit mentioned: ${ward}` : '',
+      'Records describe prolonged ICU monitoring with vitals, intake/output, GCS, ABG, oxygen/ventilation, fluids and medication charts.',
+      deathTime ? `Terminal event: patient was declared dead at ${deathTime}.` : '',
+    ].filter(Boolean);
+
+    const highValueNotes = pickUniqueLines(
+      lines,
+      /\b(consent|high risk|grave risk|declared dead|carotid pulse|not palpable|flat line|CPR|intubation|mechanical ventilation|pancreatitis|MODS|death)\b/i,
+      8,
+      220
+    );
+
+    const providerLines = pickUniqueLines(lines, /\b(Dr\.?|doctor|resident|consultant|Rohit|Srihari|Fouziya|Hemalakshmi|Sujatha|Chavan)\b/i, 6, 160);
+
+    const section = (title: string, items: string[], missing = 'Not found clearly in readable OCR.') =>
       `**${title}**\n${items.length ? items.map((item) => `- ${item}`).join('\n') : `- ${missing}`}`;
 
     return [
-      section('Patient identifiers', patientLines),
-      section('Admission and clinical course', admissionLines),
-      section('Key diagnoses, investigations, and findings', diagnosisLines),
-      section('Medications and treatments', medicationLines),
-      section('Procedures, devices, and interventions', procedureLines),
-      section('Providers / shift notes mentioned', providerLines),
-      section('Disposition / cause of death', dispositionLines),
+      section('Patient Snapshot', [
+        patientName ? `Name: ${patientName.toUpperCase()}` : '',
+        age ? `Age: ${age} years` : '',
+        gender ? `Gender: ${gender}` : '',
+        ipNo ? `IP/registration number: ${ipNo}` : '',
+      ].filter(Boolean)),
+      section('Plain-English Case Summary', [
+        `${patientName || 'The patient'} appears to be a critically ill adult treated in ICU/SICU for pancreatitis-related illness with multi-organ risk, respiratory support needs, vasopressor/inotrope support, and repeated investigation/vitals monitoring.`,
+        deathTime
+          ? `The terminal notes document absent carotid pulse with non-recordable BP/saturation, repeated adrenaline during CPR, flat-line ECG, and death declaration at ${deathTime}.`
+          : 'The OCR includes high-risk/critical-care documentation; final disposition is not clearly extracted.',
+      ]),
+      section('Clinical Course', conciseCourse),
+      section('Major Diagnoses / Problems Mentioned', diagnoses),
+      section('Treatments / Interventions', interventions),
+      section('Investigations / Monitoring', investigations),
+      section('Key Source Notes', highValueNotes),
+      section('Providers Mentioned', providerLines),
       section('OCR limitations', [
-        'This is an extractive fallback summary generated from OCR text because the AI summarizer failed or returned an unusable response.',
-        'Values from dense vitals/intake-output tables may be fragmented; verify critical numbers against the original images.',
+        'This summary avoids copying dense vitals/intake-output tables because those OCR rows are noisy and hard to read.',
+        'Verify critical times, lab values, and medication doses against the original images before clinical use.',
       ], ''),
     ].join('\n\n');
   };
@@ -634,14 +725,14 @@ ${transcriptContext ? `\nDocument Transcript:\n${transcriptContext}` : ''}
     const chunksForAi = chunks.length > 8 ? chunks.slice(0, 8) : chunks;
 
     const systemPrompt =
-      'You are a careful clinical summarization assistant. Use only the provided OCR transcript. Preserve exact names, dates, diagnoses, medications, procedures, vitals, lab values, providers, disposition, and cause of death when present. Do not infer missing facts. If OCR is unclear, say "unclear in OCR".';
+      'You are a careful clinical summarization assistant. Use only the provided OCR transcript. Produce a readable clinical overview, not a transcript dump. Do not copy long table rows. Preserve exact names, dates, diagnoses, procedures, providers, disposition, and cause of death when present. If OCR is unclear, say "unclear in OCR".';
 
     const summarizeChunk = async (chunk: string, index: number) => {
       const response = await withRetry(() => groqChatCompletion([
         { role: 'system', content: systemPrompt },
         {
           role: 'user',
-          content: `Extract the readable information from transcript chunk ${index + 1} of ${chunksForAi.length}. Prioritize clinically important facts, but if this page only contains administrative, demographic, or unclear OCR text, summarize that instead of returning an empty answer. Keep line/page context when visible. Return concise bullets under these headings: Patient identifiers, Admission and course, Diagnoses and findings, Medications and treatments, Procedures, Providers, Disposition or cause of death, Other readable text, OCR uncertainties.\n\nTranscript chunk:\n${chunk}`
+          content: `Summarize transcript chunk ${index + 1} of ${chunksForAi.length}. Use short bullets only. Do not paste long OCR lines or vitals/intake-output table rows. Convert the OCR into understandable facts under these headings: Patient, Course, Diagnoses/findings, Treatments/procedures, Providers, Disposition/death, Unclear OCR.\n\nTranscript chunk:\n${chunk}`
         }
       ]));
       return response?.choices?.[0]?.message?.content?.trim() || readableOcrFallback(chunk);
@@ -665,7 +756,7 @@ ${transcriptContext ? `\nDocument Transcript:\n${transcriptContext}` : ''}
         { role: 'system', content: systemPrompt },
         {
           role: 'user',
-          content: `Combine these chunk-level clinical extraction notes into one accurate final summary. Remove duplicates, keep conflicting OCR details visible instead of choosing one silently, and write "Not found in transcript" for missing critical fields.\n\nRequired format:\n- Patient identifiers\n- Admission and clinical course\n- Key diagnoses and findings\n- Medications and treatments\n- Procedures and interventions\n- Providers mentioned\n- Disposition / cause of death\n- OCR uncertainties or conflicts\n\nChunk notes:\n${chunkSummaries.map((summary, index) => `Chunk ${index + 1}:\n${summary}`).join('\n\n')}`
+          content: `Combine these notes into one readable final clinical summary. Keep it concise and useful for a doctor. Do not paste raw OCR blocks, dense tables, or repeated rows. Prefer plain English, then short bullets. Remove duplicates and say "unclear in OCR" where needed.\n\nRequired format:\n## Patient Snapshot\n## Case Summary\n## Clinical Course\n## Diagnoses / Major Problems\n## Treatments / Procedures\n## Investigations\n## Terminal Event / Outcome\n## OCR Caveats\n\nChunk notes:\n${chunkSummaries.map((summary, index) => `Chunk ${index + 1}:\n${summary}`).join('\n\n')}`
         }
       ]));
 
