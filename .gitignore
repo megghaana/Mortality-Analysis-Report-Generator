@@ -1,0 +1,55 @@
+# Dependencies
+node_modules/
+
+# Build output
+build/
+dist/
+.vite/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Patient uploads / generated exports
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff
+*.bmp
+*.gif
+*.webp
+*.zip
+*.7z
+*.rar
+WhatsApp Chat*.txt
+download-all-page-summaries*.md
+download-folder-summary*.md
+page-summary*.md
+transcript*.txt
+
+# Python/cache artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local tool state
+.sixth/
